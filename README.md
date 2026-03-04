@@ -7,214 +7,342 @@ sdk: docker
 pinned: false
 ---
 
-# gitf
+<div align="center">
 
-A fast and simple command-line tool written in Go to download specific folders from public GitHub repositories without cloning the entire project.
+# Gitfetch
 
-## Features
+**Download any folder from GitHub — without cloning the entire repo.**
 
-- **Fast Downloads**: Concurrent file downloads for maximum speed
-- **Selective Download**: Download only the folder you need, not the entire repository
-- **Direct to Disk**: Downloads files directly without intermediate zip packaging
-- **Beautiful Interface**: Clean ASCII art and progress indicators
-- **Cross-Platform**: Works on Linux, macOS, and Windows
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Streamlit](https://img.shields.io/badge/Streamlit-Frontend-FF4B4B?logo=streamlit&logoColor=white)](https://gitfetch.streamlit.app)
+[![Docker](https://img.shields.io/badge/Docker-Backend-2496ED?logo=docker&logoColor=white)](https://huggingface.co/spaces/cheesechat/gitfetch-api)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Installation
+[**Try the Web App**](https://gitfetch.streamlit.app) · [**API Docs**](#api-endpoints) · [**CLI Usage**](#cli-usage) · [**Contributing**](#contributing)
 
-### Quick Install (Recommended)
+</div>
 
-Install directly with Go:
+---
+
+## What is Gitfetch?
+
+Gitfetch is a tool that lets you download a specific folder from any public GitHub repository. No `git clone`, no downloading the whole repo — just the folder you need, delivered as a direct download or a ZIP file.
+
+It comes in three flavors:
+
+| Interface | For whom | Link |
+|-----------|----------|------|
+| **Web App** | Anyone with a browser | [gitfetch.streamlit.app](https://gitfetch.streamlit.app) |
+| **CLI Tool** | Developers on the terminal | `go install github.com/chinmay706/gitf@latest` |
+| **REST API** | Services and scripts | [cheesechat-gitfetch-api.hf.space](https://cheesechat-gitfetch-api.hf.space/api/v1/health) |
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **CLI & Backend** | ![Go](https://img.shields.io/badge/-Go-00ADD8?logo=go&logoColor=white&style=flat-square) | Core downloader, HTTP server, concurrency, retry logic |
+| **Web Frontend** | ![Streamlit](https://img.shields.io/badge/-Streamlit-FF4B4B?logo=streamlit&logoColor=white&style=flat-square) ![Python](https://img.shields.io/badge/-Python-3776AB?logo=python&logoColor=white&style=flat-square) | Browser UI with dark/light mode |
+| **API Hosting** | ![Docker](https://img.shields.io/badge/-Docker-2496ED?logo=docker&logoColor=white&style=flat-square) ![HuggingFace](https://img.shields.io/badge/-Hugging%20Face-FFD21E?logo=huggingface&logoColor=black&style=flat-square) | Containerized Go server on HF Spaces |
+| **Frontend Hosting** | ![Streamlit Cloud](https://img.shields.io/badge/-Streamlit%20Cloud-FF4B4B?logo=streamlit&logoColor=white&style=flat-square) | Hosted web app |
+| **CI/CD** | ![GitHub Actions](https://img.shields.io/badge/-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white&style=flat-square) | Lint, test, build, release |
+| **Releases** | ![GoReleaser](https://img.shields.io/badge/-GoReleaser-00ADD8?logo=go&logoColor=white&style=flat-square) | Cross-platform binary builds |
+
+---
+
+## Architecture
+
+```
+                          ┌─────────────────────┐
+                          │   Streamlit Cloud    │
+                          │  gitfetch.streamlit  │
+                          │       .app           │
+                          └────────┬────────────┘
+                                   │
+                    ┌──────────────┴──────────────┐
+                    │                             │
+              (Go backend up?)              (fallback)
+                    │                             │
+                    v                             v
+         ┌──────────────────┐          ┌──────────────────┐
+         │  HF Spaces       │          │  Direct GitHub    │
+         │  Go REST API     │          │  API calls from   │
+         │  /api/v1/...     │          │  Python            │
+         └────────┬─────────┘          └──────────────────┘
+                  │
+      ┌───────────┼───────────┐
+      │           │           │
+      v           v           v
+  ETag Cache   SHA Verify   Retry
+  (304 = free) (integrity)  (backoff)
+      │
+      v
+  GitHub REST API v3
+```
+
+The Streamlit frontend auto-detects whether the Go backend is available. If it is, requests are routed through Go to benefit from caching, SHA verification, and retries. If not, the frontend calls GitHub directly from Python — users are never blocked.
+
+---
+
+## Key Features
+
+### Backend (Go)
+
+- **Concurrent Downloads** — bounded worker pool via `errgroup` with configurable concurrency
+- **SHA-1 Integrity Verification** — hashes files during streaming with `io.TeeReader`, compares against GitHub's SHA
+- **ETag Caching** — caches API responses locally; `304 Not Modified` responses are free (don't count against rate limits)
+- **Exponential Backoff Retry** — handles 5xx, 429, and network errors with rate-limit-aware delays
+- **Streaming I/O** — files stream directly to disk, O(buffer) memory instead of O(file_size)
+- **Atomic Writes** — downloads to `.tmp` then renames, preventing partial files
+- **Structured Logging** — `log/slog` with debug/info levels via `--verbose`
+- **Graceful Shutdown** — signal-aware context propagation (`SIGINT`/`SIGTERM`)
+- **HTTP Server Mode** — full REST API with CORS, request-ID, logging, and panic recovery middleware
+
+### Frontend (Streamlit)
+
+- **Dark / Light Mode** — toggle with full GitHub-style theming
+- **Go Backend Toggle** — auto-detects and connects to the Go API server
+- **File Preview** — browse the file tree with sizes before downloading
+- **ZIP Download** — bundles files into a ZIP right in the browser
+- **Example URLs** — one-click examples to try immediately
+- **SHA Verified Indicator** — shows when files pass integrity checks via the backend
+
+### CLI
+
+- **Dry-run Mode** — preview files and sizes without downloading
+- **Custom Output** — `-o` flag for output directory name
+- **Timeout Control** — `--timeout` for overall operation deadline
+- **Cache Control** — `--no-cache`, `--cache-dir` flags
+- **Integrity Toggle** — `--verify` / `--verify=false`
+
+---
+
+## CLI Usage
+
+### Install
 
 ```bash
 go install github.com/chinmay706/gitf@latest
 ```
 
-If `gitf` is not found after installation, add Go's bin directory to your PATH:
+Or download a binary from the [Releases page](https://github.com/chinmay706/Gitfetch/releases).
+
+### Commands
 
 ```bash
-# For Linux/macOS
-echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc
-source ~/.zshrc
+# Download a folder
+gitf download https://github.com/spf13/cobra/tree/main/doc
 
-# For Windows (PowerShell)
-$env:PATH += ";$env:GOPATH\bin"
+# Custom output directory
+gitf download https://github.com/spf13/cobra/tree/main/doc -o cobra-docs
+
+# Preview files without downloading
+gitf download https://github.com/spf13/cobra/tree/main/doc --dry-run
+
+# High concurrency with verbose logging
+gitf download <url> -c 20 -v
+
+# Disable SHA verification and caching
+gitf download <url> --verify=false --no-cache
+
+# Start the HTTP API server
+gitf serve --port 8080 --verbose
+
+# Print version
+gitf version
 ```
 
-### Alternative: Download Binary
+### All CLI Flags
 
-1. Download the latest release from the [Releases page](https://github.com/chinmay706/gitf/releases)
-2. Extract the binary to your system PATH
-3. Make it executable:
-   ```bash
-   chmod +x gitf
-   ```
+| Command | Flag | Default | Description |
+|---------|------|---------|-------------|
+| `download` | `-o, --output` | `download` | Output directory name |
+| `download` | `-c, --concurrency` | `10` | Max parallel downloads |
+| `download` | `-t, --timeout` | `5m` | Overall operation timeout |
+| `download` | `-v, --verbose` | `false` | Debug-level logging |
+| `download` | `--dry-run` | `false` | List files without downloading |
+| `download` | `--verify` | `true` | SHA-1 integrity check after download |
+| `download` | `--no-cache` | `false` | Disable ETag response caching |
+| `download` | `--cache-dir` | `~/.gitf/cache` | Cache directory path |
+| `serve` | `--port` | `8080` | Server listen port |
+| `serve` | `--cors-origin` | `*` | Allowed CORS origin |
+| `serve` | `-v, --verbose` | `false` | Debug-level logging |
+| `serve` | `--no-cache` | `false` | Disable caching |
+| `serve` | `--cache-dir` | `~/.gitf/cache` | Cache directory path |
 
-## Usage
+---
 
-### Basic Usage
+## API Endpoints
+
+The Go server exposes a REST API at `/api/v1/`:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/health` | Health check — returns `{"status":"ok"}` |
+| `GET` | `/api/v1/preview?url=<github-url>` | List files in a GitHub folder (JSON) |
+| `POST` | `/api/v1/download` | Download folder as a streamed ZIP |
+
+**Preview example:**
 
 ```bash
-gitf download <github-folder-url>
+curl "https://cheesechat-gitfetch-api.hf.space/api/v1/preview?url=https://github.com/spf13/cobra/tree/main/doc"
 ```
 
-### Examples
-
-Download a specific folder from a GitHub repository:
+**Download example:**
 
 ```bash
-# Download the docs folder from cobra
-gitf download https://github.com/spf13/cobra/tree/main/docs
-
-# Download components folder
-gitf download https://github.com/facebook/react/tree/main/packages/react-dom/src
-
-# Download with custom output directory name
-gitf download https://github.com/microsoft/vscode/tree/main/extensions -o vscode-extensions
+curl -X POST https://cheesechat-gitfetch-api.hf.space/api/v1/download \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://github.com/spf13/cobra/tree/main/doc"}' \
+  -o cobra-docs.zip
 ```
 
-### Command Options
+---
 
-```bash
-gitf download [github-folder-url] [flags]
+## Project Structure
 
-Flags:
-  -o, --output string        Name of the output directory (default "download")
-  -c, --concurrency int      Max parallel downloads (default 10)
-  -t, --timeout duration     Overall operation timeout (default 5m)
-  -v, --verbose              Enable debug-level logging
-      --dry-run              List files without downloading
-  -h, --help                 Help for download command
+```
+gitf/
+├── main.go                          # Entry point, signal handling, version injection
+├── go.mod / go.sum                  # Go module
+├── Dockerfile                       # Multi-stage Docker build for HF Spaces
+├── .goreleaser.yml                  # Cross-platform release config
+│
+├── cmd/                             # CLI layer (Cobra)
+│   ├── root.go                      #   Root command + ASCII banner
+│   ├── download.go                  #   download subcommand + all flags
+│   ├── serve.go                     #   serve subcommand (HTTP server)
+│   └── version.go                   #   version subcommand
+│
+├── internal/
+│   ├── downloader/                  # Core download engine
+│   │   ├── downloader.go            #   Downloader struct, options, HTTPClient interface
+│   │   ├── parser.go                #   GitHub URL parser
+│   │   ├── github.go                #   Contents API client, recursive tree walk
+│   │   ├── download.go              #   Concurrent download, streaming, SHA verify
+│   │   ├── retry.go                 #   Exponential backoff + ETag caching
+│   │   ├── errors.go                #   RateLimitError, APIError, IntegrityError
+│   │   ├── parser_test.go           #   12-case table-driven URL tests
+│   │   ├── download_test.go         #   Unit tests: retry, SHA, cache, context
+│   │   └── integration_test.go      #   End-to-end with httptest.Server
+│   │
+│   ├── server/                      # HTTP API server
+│   │   ├── server.go                #   Router, graceful shutdown
+│   │   ├── handlers.go              #   /health, /preview, /download handlers
+│   │   ├── middleware.go            #   CORS, request-ID, logging, recovery
+│   │   └── handlers_test.go         #   8 handler + middleware tests
+│   │
+│   └── cache/                       # ETag response cache
+│       ├── cache.go                 #   File-based cache with TTL
+│       └── cache_test.go            #   Put/get/expiry/clear tests
+│
+├── frontend/                        # Streamlit web UI
+│   ├── app.py                       #   Main Streamlit app (dark/light, dual-mode)
+│   ├── github_downloader.py         #   Python port of Go downloader
+│   ├── api_client.py                #   Go backend API client with fallback
+│   ├── requirements.txt             #   streamlit, requests
+│   └── .streamlit/config.toml       #   Server config
+│
+└── .github/workflows/               # CI/CD
+    ├── ci.yml                       #   Lint + test + build matrix
+    └── release.yml                  #   GoReleaser on tag push
 ```
 
-## Web UI
-
-Don't want to install anything? Use the hosted Streamlit web app:
-
-**[Open Gitfetch Web](https://gitfetch.streamlit.app)**
-
-Paste a GitHub folder URL, preview the file list, and download everything as a ZIP — right from your browser.
-
-### Run locally
-
-```bash
-cd frontend
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-### Deploy to Streamlit Community Cloud
-
-1. Push this repo to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io) and connect the repo
-3. Set **Main file path** to `frontend/app.py`
-4. (Optional) Add a `GITHUB_TOKEN` secret in the app settings for higher rate limits
-
-## Use Cases
-
-- **Download Documentation**: Get just the docs folder from a project
-- **Extract Components**: Download specific UI components or modules
-- **Sample Code**: Get example code without the entire repository
-- **Configuration Files**: Download config templates or examples
-- **Assets**: Download images, fonts, or other static assets
-
-## How It Works
-
-1. **URL Parsing**: Extracts repository owner, name, branch, and folder path from GitHub URL
-2. **API Discovery**: Uses GitHub API to discover all files in the specified folder
-3. **Concurrent Download**: Downloads files concurrently (up to 10 simultaneous downloads)
-4. **Direct Write**: Writes files directly to disk in a temporary directory
-5. **Atomic Move**: Atomically moves completed download to final destination
-6. **Progress Feedback**: Shows real-time download progress
+---
 
 ## Development
 
 ### Prerequisites
 
-- Go 1.19 or higher
-- Git
+- **Go 1.22+** (for ServeMux method routing)
+- **Python 3.10+** (for Streamlit frontend)
+- **Git**
 
-### Building
+### Build & Test
 
 ```bash
-# Clone the repository
-git clone https://github.com/chinmay706/gitf.git
-cd gitf
+git clone https://github.com/chinmay706/Gitfetch.git
+cd Gitfetch
 
-# Install dependencies
-go mod tidy
+# Build
+go build -o gitf .
 
-# Build the binary
-go build -o gitf
+# Run all tests with race detector
+go test ./... -race -count=1
 
-# Run tests
-go test ./...
+# Run the server locally
+go run . serve --port 8080 --verbose
+
+# Run the frontend locally
+cd frontend
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-### Project Structure
+### Environment Variables
 
-```
-gitf/
-├── cmd/                    # CLI commands
-│   ├── root.go            # Root command with ASCII art
-│   ├── download.go        # Download command implementation
-│   └── version.go         # Version command
-├── internal/
-│   └── downloader/        # Core download logic
-│       ├── downloader.go  # Downloader struct, options, interface
-│       ├── github.go      # GitHub API integration
-│       ├── parser.go      # URL parsing
-│       ├── download.go    # Concurrent file download
-│       ├── retry.go       # Exponential backoff retry
-│       └── errors.go      # Custom error types
-├── frontend/              # Streamlit web UI
-│   ├── app.py             # Streamlit application
-│   ├── github_downloader.py # Python port of download logic
-│   ├── requirements.txt
-│   └── .streamlit/
-│       └── config.toml
-├── .github/workflows/     # CI/CD
-│   ├── ci.yml
-│   └── release.yml
-├── main.go                # Application entry point
-├── go.mod                 # Go module definition
-└── README.md              # This file
-```
+| Variable | Purpose |
+|----------|---------|
+| `GITHUB_TOKEN` | GitHub PAT for higher API rate limits (60 → 5,000 req/hr) |
+| `GH_TOKEN` | Alternative name (same purpose) |
 
-## Contributing
+---
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+## Deployment
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+| Component | Platform | Config |
+|-----------|----------|--------|
+| **Go API** | Hugging Face Spaces (Docker) | `Dockerfile` in repo root, port 7860 |
+| **Web UI** | Streamlit Community Cloud | `frontend/app.py`, branch `main` |
 
-## License
+The frontend auto-detects the backend. If the HF Space is sleeping (free tier goes idle after ~15 min), the app transparently falls back to direct GitHub API calls.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+---
 
-## Acknowledgments
+## Live Links
 
-- Built with [Cobra](https://github.com/spf13/cobra) for CLI framework
-- Uses [figlet4go](https://github.com/mbndr/figlet4go) for ASCII art
-- Inspired by the need for selective GitHub folder downloads
+| Service | URL |
+|---------|-----|
+| Web App | [gitfetch.streamlit.app](https://gitfetch.streamlit.app) |
+| API Health | [cheesechat-gitfetch-api.hf.space/api/v1/health](https://cheesechat-gitfetch-api.hf.space/api/v1/health) |
+| GitHub Repo | [github.com/chinmay706/Gitfetch](https://github.com/chinmay706/Gitfetch) |
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `rate limited (HTTP 403)` | GitHub API limit exceeded | Set `GITHUB_TOKEN` env var or paste token in sidebar |
+| `GitHub API error (HTTP 404)` | Repo is private or path doesn't exist | Check URL, ensure repo is public |
+| `integrity check failed` | File corrupted during download | Retry; if persistent, use `--verify=false` |
+| `Go backend is not reachable` | HF Space is sleeping | Wait ~30s for cold start, or disable the toggle |
 
-**"github API responded with status: 404 Not Found"**
-- Make sure the repository is public
-- Check that the folder path exists
-- Verify the branch name is correct
+---
 
-**"Invalid URL"**
-- Ensure you're using the full GitHub URL to a folder (not a file)
-- URL should be in format: `https://github.com/owner/repo/tree/branch/path`
+## Contributing
 
-**Permission denied when installing**
-- Use `sudo` for system-wide installation
-- Or install to user directory with `~/.local/bin`
+Contributions are welcome! Please open an issue first to discuss what you'd like to change.
 
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Commit your changes
+4. Push and open a Pull Request
 
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+Built with [Go](https://go.dev) · [Streamlit](https://streamlit.io) · [Cobra](https://github.com/spf13/cobra)
+
+Hosted on [Hugging Face Spaces](https://huggingface.co/spaces/cheesechat/gitfetch-api) · [Streamlit Cloud](https://gitfetch.streamlit.app)
+
+</div>
