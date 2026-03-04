@@ -2,6 +2,8 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -82,7 +84,7 @@ func (d *Downloader) downloadFiles(ctx context.Context, files []GitHubContent, o
 
 			d.logger.Debug("downloading file", "path", rel, "url", f.DownloadURL)
 
-			if err := d.streamFile(ctx, f.DownloadURL, destPath); err != nil {
+			if err := d.streamFile(ctx, f.DownloadURL, destPath, f.SHA); err != nil {
 				return fmt.Errorf("failed to download %s: %w", rel, err)
 			}
 
@@ -102,7 +104,9 @@ func (d *Downloader) downloadFiles(ctx context.Context, files []GitHubContent, o
 }
 
 // streamFile downloads a URL and streams it directly to destPath via a temp file.
-func (d *Downloader) streamFile(ctx context.Context, downloadURL, destPath string) error {
+// When SHA verification is enabled, it hashes the content during the stream
+// using io.TeeReader to avoid a second read pass.
+func (d *Downloader) streamFile(ctx context.Context, downloadURL, destPath, expectedSHA string) error {
 	resp, err := d.doWithRetry(ctx, downloadURL)
 	if err != nil {
 		return err
@@ -115,7 +119,13 @@ func (d *Downloader) streamFile(ctx context.Context, downloadURL, destPath strin
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 
-	_, copyErr := io.Copy(f, resp.Body)
+	var reader io.Reader = resp.Body
+	hasher := sha1.New()
+	if d.verifySHA && expectedSHA != "" {
+		reader = io.TeeReader(resp.Body, hasher)
+	}
+
+	_, copyErr := io.Copy(f, reader)
 	closeErr := f.Close()
 
 	if copyErr != nil {
@@ -125,6 +135,15 @@ func (d *Downloader) streamFile(ctx context.Context, downloadURL, destPath strin
 	if closeErr != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to close file: %w", closeErr)
+	}
+
+	if d.verifySHA && expectedSHA != "" {
+		got := hex.EncodeToString(hasher.Sum(nil))
+		if got != expectedSHA {
+			os.Remove(tmpPath)
+			return &IntegrityError{Path: destPath, Expected: expectedSHA, Got: got}
+		}
+		d.logger.Debug("SHA verified", "path", destPath, "sha", got)
 	}
 
 	if err := os.Rename(tmpPath, destPath); err != nil {

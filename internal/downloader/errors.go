@@ -37,3 +37,15 @@ func (e *APIError) Error() string {
 	}
 	return msg
 }
+
+// IntegrityError is returned when a downloaded file's SHA hash does not match
+// the value reported by the GitHub Contents API.
+type IntegrityError struct {
+	Path     string
+	Expected string
+	Got      string
+}
+
+func (e *IntegrityError) Error() string {
+	return fmt.Sprintf("integrity check failed for %s: expected SHA %s, got %s", e.Path, e.Expected, e.Got)
+}

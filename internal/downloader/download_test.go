@@ -2,12 +2,22 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chinmay706/gitf/internal/cache"
 )
+
+func newTestCache(dir string) (*cache.Cache, error) {
+	return cache.New(dir)
+}
 
 // mockTransport implements http.RoundTripper for unit-level HTTP mocking.
 type mockTransport struct {
@@ -215,5 +225,137 @@ func TestCollectFiles_RecursiveDirectories(t *testing.T) {
 	}
 	if files[1].Name != "file2.txt" {
 		t.Errorf("expected file2.txt, got %s", files[1].Name)
+	}
+}
+
+func TestStreamFile_SHAVerification_Pass(t *testing.T) {
+	content := "hello, world"
+	h := sha1.Sum([]byte(content))
+	expectedSHA := hex.EncodeToString(h[:])
+
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(content)),
+			Header:     http.Header{},
+		}, nil
+	})
+
+	d := New(WithHTTPClient(client), WithMaxRetries(0), WithVerifySHA(true))
+	destPath := filepath.Join(t.TempDir(), "testfile.txt")
+
+	if err := d.streamFile(context.Background(), "https://example.com/file", destPath, expectedSHA); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("content mismatch: got %q, want %q", string(data), content)
+	}
+}
+
+func TestStreamFile_SHAVerification_Fail(t *testing.T) {
+	content := "hello, world"
+
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(content)),
+			Header:     http.Header{},
+		}, nil
+	})
+
+	d := New(WithHTTPClient(client), WithMaxRetries(0), WithVerifySHA(true))
+	destPath := filepath.Join(t.TempDir(), "testfile.txt")
+
+	err := d.streamFile(context.Background(), "https://example.com/file", destPath, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("expected integrity error, got nil")
+	}
+
+	var intErr *IntegrityError
+	if !errors.As(err, &intErr) {
+		t.Fatalf("expected *IntegrityError, got %T: %v", err, err)
+	}
+
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Error("expected file to be cleaned up after integrity failure")
+	}
+}
+
+func TestStreamFile_SHASkippedWhenDisabled(t *testing.T) {
+	content := "some data"
+
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(content)),
+			Header:     http.Header{},
+		}, nil
+	})
+
+	d := New(WithHTTPClient(client), WithMaxRetries(0), WithVerifySHA(false))
+	destPath := filepath.Join(t.TempDir(), "testfile.txt")
+
+	if err := d.streamFile(context.Background(), "https://example.com/file", destPath, "wrong-sha"); err != nil {
+		t.Fatalf("expected no error when verify disabled: %v", err)
+	}
+}
+
+func TestDoWithRetry_ETagCaching(t *testing.T) {
+	calls := 0
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if etag := req.Header.Get("If-None-Match"); etag == `W/"test-etag"` {
+			return &http.Response{
+				StatusCode: 304,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     http.Header{},
+			}, nil
+		}
+		h := http.Header{}
+		h.Set("ETag", `W/"test-etag"`)
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`[{"name":"a.txt"}]`)),
+			Header:     h,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	cacheImport, err := newTestCache(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	d := New(WithHTTPClient(client), WithMaxRetries(0), WithCache(cacheImport))
+
+	// First call: cache miss, should get 200 and store
+	resp1, err := d.doWithRetry(context.Background(), "https://api.test/repos/o/r/contents/dir")
+	if err != nil {
+		t.Fatalf("first call error: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if string(body1) != `[{"name":"a.txt"}]` {
+		t.Errorf("first call body: got %q", string(body1))
+	}
+
+	// Second call: should send If-None-Match, get 304, serve from cache
+	resp2, err := d.doWithRetry(context.Background(), "https://api.test/repos/o/r/contents/dir")
+	if err != nil {
+		t.Fatalf("second call error: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if string(body2) != `[{"name":"a.txt"}]` {
+		t.Errorf("second call body: got %q", string(body2))
+	}
+
+	if calls != 2 {
+		t.Errorf("expected 2 HTTP calls, got %d", calls)
 	}
 }

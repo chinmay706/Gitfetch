@@ -10,6 +10,7 @@ from github_downloader import (
     MAX_FILES,
     MAX_SIZE_WARN,
 )
+import api_client
 
 # ── Page config ──────────────────────────────────────────────────────────
 
@@ -353,6 +354,10 @@ if "dark_mode" not in st.session_state:
 if "files" not in st.session_state:
     st.session_state.files = None
     st.session_state.info = None
+if "use_go_backend" not in st.session_state:
+    st.session_state.use_go_backend = api_client.is_server_up()
+if "sha_verified" not in st.session_state:
+    st.session_state.sha_verified = False
 
 # ── Inject active theme ─────────────────────────────────────────────────
 
@@ -370,6 +375,16 @@ with st.sidebar:
         type="password",
         help="Increases API rate limit from 60 to 5,000 requests/hour.",
     )
+
+    st.divider()
+
+    st.toggle("Use Go backend", key="use_go_backend",
+              help="Route requests through the gitf Go server for caching, SHA verification, and retry logic.")
+    backend_up = api_client.is_server_up()
+    if st.session_state.use_go_backend and not backend_up:
+        st.warning("Go backend is not reachable. Run `gitf serve` first, or disable this toggle.")
+    elif st.session_state.use_go_backend and backend_up:
+        st.success("Connected to Go backend", icon="\u2705")
 
     st.divider()
 
@@ -435,30 +450,50 @@ if fetch_clicked:
         st.error("Please enter a GitHub folder URL.")
         st.stop()
 
-    try:
-        info = parse_github_url(url_input)
-    except GitfError as e:
-        st.error(str(e))
-        st.stop()
+    use_backend = st.session_state.use_go_backend and api_client.is_server_up()
+    st.session_state.sha_verified = False
+
+    if use_backend:
+        status = st.status("Scanning via Go backend...", expanded=True)
+        try:
+            data = api_client.preview(url_input, token=gh_token)
+            info = {
+                "owner": data["owner"],
+                "repo": data["repo"],
+                "branch": data["branch"],
+                "path": data["path"],
+            }
+            files = data.get("files") or []
+            st.session_state.sha_verified = all(f.get("sha") for f in files)
+        except Exception as e:
+            status.update(label="Error", state="error")
+            st.error(str(e))
+            st.stop()
+    else:
+        try:
+            info = parse_github_url(url_input)
+        except GitfError as e:
+            st.error(str(e))
+            st.stop()
+
+        status = st.status("Scanning repository...", expanded=True)
+        try:
+            files = collect_files(
+                info,
+                token=gh_token,
+                on_status=lambda msg: status.update(label=msg),
+            )
+        except RateLimitError as e:
+            status.update(label="Rate limited", state="error")
+            st.error(str(e))
+            st.stop()
+        except GitfError as e:
+            status.update(label="Error", state="error")
+            st.error(str(e))
+            st.stop()
 
     st.session_state.info = info
     st.session_state.files = None
-
-    status = st.status("Scanning repository...", expanded=True)
-    try:
-        files = collect_files(
-            info,
-            token=gh_token,
-            on_status=lambda msg: status.update(label=msg),
-        )
-    except RateLimitError as e:
-        status.update(label="Rate limited", state="error")
-        st.error(str(e))
-        st.stop()
-    except GitfError as e:
-        status.update(label="Error", state="error")
-        st.error(str(e))
-        st.stop()
 
     if not files:
         status.update(label="No files found", state="error")
@@ -476,11 +511,12 @@ files = st.session_state.files
 if info and files:
     st.divider()
 
-    cols = st.columns(4)
-    cols[0].metric("Owner", info["owner"])
-    cols[1].metric("Repo", info["repo"])
-    cols[2].metric("Branch", info["branch"])
-    cols[3].metric("Files", len(files))
+    mcols = st.columns(5)
+    mcols[0].metric("Owner", info["owner"])
+    mcols[1].metric("Repo", info["repo"])
+    mcols[2].metric("Branch", info["branch"])
+    mcols[3].metric("Files", len(files))
+    mcols[4].metric("SHA Verified", "Yes" if st.session_state.sha_verified else "No")
 
     total_size = sum(f["size"] for f in files)
 
@@ -514,30 +550,45 @@ if info and files:
         download_clicked = st.button("Download as ZIP", use_container_width=True)
 
     if download_clicked:
-        base_prefix = info["path"]
-        if base_prefix and not base_prefix.endswith("/"):
-            base_prefix += "/"
-
+        use_backend = st.session_state.use_go_backend and api_client.is_server_up()
         progress = st.progress(0, text="Downloading...")
 
-        def update_progress(done, total):
-            progress.progress(done / total, text=f"Downloading file {done}/{total}...")
+        if use_backend:
+            try:
+                zip_buf = api_client.download_zip(
+                    url_input or f"https://github.com/{info['owner']}/{info['repo']}/tree/{info['branch']}/{info['path']}",
+                    token=gh_token,
+                    on_progress=lambda done, total: progress.progress(
+                        min(done / total, 1.0), text=f"Downloading... {human_size(done)}"
+                    ),
+                )
+            except Exception as e:
+                progress.empty()
+                st.error(str(e))
+                st.stop()
+        else:
+            base_prefix = info["path"]
+            if base_prefix and not base_prefix.endswith("/"):
+                base_prefix += "/"
 
-        try:
-            zip_buf = download_as_zip(
-                files,
-                base_prefix=base_prefix,
-                token=gh_token,
-                on_progress=update_progress,
-            )
-        except RateLimitError as e:
-            progress.empty()
-            st.error(str(e))
-            st.stop()
-        except GitfError as e:
-            progress.empty()
-            st.error(str(e))
-            st.stop()
+            def update_progress(done, total):
+                progress.progress(done / total, text=f"Downloading file {done}/{total}...")
+
+            try:
+                zip_buf = download_as_zip(
+                    files,
+                    base_prefix=base_prefix,
+                    token=gh_token,
+                    on_progress=update_progress,
+                )
+            except RateLimitError as e:
+                progress.empty()
+                st.error(str(e))
+                st.stop()
+            except GitfError as e:
+                progress.empty()
+                st.error(str(e))
+                st.stop()
 
         progress.progress(1.0, text="Done!")
 

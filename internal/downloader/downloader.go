@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/chinmay706/gitf/internal/cache"
 )
 
 // HTTPClient abstracts *http.Client for testability.
@@ -27,6 +29,8 @@ type Downloader struct {
 	token       string
 	concurrency int
 	maxRetries  int
+	verifySHA   bool
+	cache       *cache.Cache
 	logger      *slog.Logger
 	onProgress  func(Progress)
 }
@@ -70,6 +74,14 @@ func WithProgress(fn func(Progress)) Option {
 	return func(d *Downloader) { d.onProgress = fn }
 }
 
+func WithVerifySHA(enable bool) Option {
+	return func(d *Downloader) { d.verifySHA = enable }
+}
+
+func WithCache(c *cache.Cache) Option {
+	return func(d *Downloader) { d.cache = c }
+}
+
 // New creates a Downloader with sensible defaults. Options override defaults.
 func New(opts ...Option) *Downloader {
 	d := &Downloader{
@@ -101,4 +113,13 @@ func New(opts ...Option) *Downloader {
 		}
 	}
 	return d
+}
+
+// HTTPTimeout returns the HTTP client timeout for external callers that
+// need a standalone client matching the downloader's configuration.
+func (d *Downloader) HTTPTimeout() time.Duration {
+	if c, ok := d.client.(*http.Client); ok && c.Timeout > 0 {
+		return c.Timeout
+	}
+	return 30 * time.Second
 }

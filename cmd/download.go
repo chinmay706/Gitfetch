@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/chinmay706/gitf/internal/cache"
 	"github.com/chinmay706/gitf/internal/downloader"
 	"github.com/spf13/cobra"
 )
@@ -18,6 +20,9 @@ var (
 	timeout        time.Duration
 	verbose        bool
 	dryRun         bool
+	verifySHA      bool
+	noCache        bool
+	cacheDir       string
 )
 
 var downloadCmd = &cobra.Command{
@@ -63,13 +68,30 @@ Example:
 
 		logger := buildLogger(verbose)
 
-		dl := downloader.New(
+		opts := []downloader.Option{
 			downloader.WithConcurrency(concurrency),
+			downloader.WithVerifySHA(verifySHA),
 			downloader.WithLogger(logger),
 			downloader.WithProgress(func(p downloader.Progress) {
 				fmt.Printf("\r  [%d/%d] %s", p.CompletedFiles, p.TotalFiles, p.CurrentFile)
 			}),
-		)
+		}
+
+		if !noCache {
+			dir := cacheDir
+			if dir == "" {
+				home, _ := os.UserHomeDir()
+				dir = filepath.Join(home, ".gitf", "cache")
+			}
+			c, err := cache.New(dir)
+			if err != nil {
+				logger.Warn("could not create cache, proceeding without", "error", err)
+			} else {
+				opts = append(opts, downloader.WithCache(c))
+			}
+		}
+
+		dl := downloader.New(opts...)
 
 		if dryRun {
 			return runDryRun(ctx, dl, urlInfo)
@@ -140,4 +162,7 @@ func init() {
 	downloadCmd.Flags().DurationVarP(&timeout, "timeout", "t", 5*time.Minute, "Overall operation timeout")
 	downloadCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable debug-level logging")
 	downloadCmd.Flags().BoolVar(&dryRun, "dry-run", false, "List files without downloading")
+	downloadCmd.Flags().BoolVar(&verifySHA, "verify", true, "Verify file integrity via SHA-1 hash after download")
+	downloadCmd.Flags().BoolVar(&noCache, "no-cache", false, "Disable ETag-based response caching")
+	downloadCmd.Flags().StringVar(&cacheDir, "cache-dir", "", "Cache directory (default ~/.gitf/cache)")
 }

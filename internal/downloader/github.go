@@ -12,6 +12,7 @@ type GitHubContent struct {
 	Name        string `json:"name"`
 	Path        string `json:"path"`
 	Type        string `json:"type"`
+	SHA         string `json:"sha"`
 	Size        int64  `json:"size"`
 	DownloadURL string `json:"download_url"`
 	APIURL      string `json:"url"`

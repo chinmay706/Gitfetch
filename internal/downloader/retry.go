@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,8 +14,19 @@ import (
 // doWithRetry executes a GET request with exponential backoff.
 // It returns the response only for 2xx status codes; all other outcomes
 // are either retried or surfaced as typed errors.
+//
+// When a cache is configured, it sends If-None-Match with the cached ETag.
+// On 304 Not Modified (which is free and doesn't count against rate limits),
+// it returns a synthetic response built from the cached body.
 func (d *Downloader) doWithRetry(ctx context.Context, url string) (*http.Response, error) {
 	var lastErr error
+	var cachedETag string
+
+	if d.cache != nil {
+		if entry, ok := d.cache.Get(url); ok {
+			cachedETag = entry.ETag
+		}
+	}
 
 	for attempt := 0; attempt <= d.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -37,6 +49,9 @@ func (d *Downloader) doWithRetry(ctx context.Context, url string) (*http.Respons
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 		d.setHeaders(req)
+		if cachedETag != "" {
+			req.Header.Set("If-None-Match", cachedETag)
+		}
 
 		resp, err := d.client.Do(req)
 		if err != nil {
@@ -48,7 +63,38 @@ func (d *Downloader) doWithRetry(ctx context.Context, url string) (*http.Respons
 			continue
 		}
 
+		// 304 Not Modified -- serve from cache (free, no rate limit cost)
+		if resp.StatusCode == http.StatusNotModified && d.cache != nil {
+			resp.Body.Close()
+			if entry, ok := d.cache.Get(url); ok {
+				d.logger.Debug("cache hit (304)", "url", url)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader([]byte(entry.Body))),
+					Header:     resp.Header,
+				}, nil
+			}
+		}
+
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Store response in cache if an ETag is present.
+			// Only cache API listing responses (JSON), not raw file downloads.
+			if d.cache != nil {
+				if etag := resp.Header.Get("ETag"); etag != "" {
+					bodyBytes, readErr := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					if readErr != nil {
+						return nil, fmt.Errorf("failed to read response body: %w", readErr)
+					}
+					_ = d.cache.Put(url, etag, string(bodyBytes))
+					d.logger.Debug("cached response", "url", url, "etag", etag)
+					return &http.Response{
+						StatusCode: resp.StatusCode,
+						Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+						Header:     resp.Header,
+					}, nil
+				}
+			}
 			return resp, nil
 		}
 
