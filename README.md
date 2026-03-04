@@ -69,9 +69,36 @@ gitf download https://github.com/microsoft/vscode/tree/main/extensions -o vscode
 gitf download [github-folder-url] [flags]
 
 Flags:
-  -o, --output string   Name of the output directory (default "download")
-  -h, --help           Help for download command
+  -o, --output string        Name of the output directory (default "download")
+  -c, --concurrency int      Max parallel downloads (default 10)
+  -t, --timeout duration     Overall operation timeout (default 5m)
+  -v, --verbose              Enable debug-level logging
+      --dry-run              List files without downloading
+  -h, --help                 Help for download command
 ```
+
+## Web UI
+
+Don't want to install anything? Use the hosted Streamlit web app:
+
+**[Open Gitfetch Web](https://gitfetch.streamlit.app)**
+
+Paste a GitHub folder URL, preview the file list, and download everything as a ZIP — right from your browser.
+
+### Run locally
+
+```bash
+cd frontend
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Deploy to Streamlit Community Cloud
+
+1. Push this repo to GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io) and connect the repo
+3. Set **Main file path** to `frontend/app.py`
+4. (Optional) Add a `GITHUB_TOKEN` secret in the app settings for higher rate limits
 
 ## Use Cases
 
@@ -120,12 +147,25 @@ go test ./...
 gitf/
 ├── cmd/                    # CLI commands
 │   ├── root.go            # Root command with ASCII art
-│   └── download.go        # Download command implementation
+│   ├── download.go        # Download command implementation
+│   └── version.go         # Version command
 ├── internal/
 │   └── downloader/        # Core download logic
+│       ├── downloader.go  # Downloader struct, options, interface
 │       ├── github.go      # GitHub API integration
 │       ├── parser.go      # URL parsing
-│       └── download.go    # Direct file download
+│       ├── download.go    # Concurrent file download
+│       ├── retry.go       # Exponential backoff retry
+│       └── errors.go      # Custom error types
+├── frontend/              # Streamlit web UI
+│   ├── app.py             # Streamlit application
+│   ├── github_downloader.py # Python port of download logic
+│   ├── requirements.txt
+│   └── .streamlit/
+│       └── config.toml
+├── .github/workflows/     # CI/CD
+│   ├── ci.yml
+│   └── release.yml
 ├── main.go                # Application entry point
 ├── go.mod                 # Go module definition
 └── README.md              # This file
