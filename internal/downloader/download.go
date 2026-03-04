@@ -1,28 +1,34 @@
 package downloader
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
+	"sync/atomic"
+
+	"golang.org/x/sync/errgroup"
 )
 
-// DownloadFolder downloads a GitHub folder and writes files directly to the output directory
-func DownloadFolder(info *GitHubURLInfo, outputDirName string) error {
-	// If output path exists and is a file, fail fast
-	if fi, err := os.Stat(outputDirName); err == nil {
-		if !fi.IsDir() {
-			return fmt.Errorf("output path '%s' exists and is a file; choose a different -o", outputDirName)
-		}
+// DownloadFolder downloads a GitHub folder to outputDirName atomically.
+func (d *Downloader) DownloadFolder(ctx context.Context, info *GitHubURLInfo, outputDirName string) error {
+	if fi, err := os.Stat(outputDirName); err == nil && !fi.IsDir() {
+		return fmt.Errorf("output path '%s' exists and is a file; choose a different -o", outputDirName)
 	}
 
-	// Create a temporary directory for atomic operations
+	d.logger.Info("collecting file list from GitHub API")
+	files, err := d.CollectFiles(ctx, info)
+	if err != nil {
+		return fmt.Errorf("failed to list files: %w", err)
+	}
+	d.logger.Info("file list collected", "count", len(files))
+
+	if len(files) == 0 {
+		return fmt.Errorf("no files found at the specified path")
+	}
+
 	tempDir := outputDirName + ".tmp"
 	if err := os.RemoveAll(tempDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to clean temp directory: %w", err)
@@ -31,37 +37,20 @@ func DownloadFolder(info *GitHubURLInfo, outputDirName string) error {
 		return fmt.Errorf("could not create temp directory: %w", err)
 	}
 
-	// Collect all files from GitHub API
-	initialAPIURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s",
-		info.Owner, info.Repo, info.Path, info.Branch)
-
-	var allFiles []GitHubContent
-	err := collectAllFiles(initialAPIURL, &allFiles)
-	if err != nil {
-		os.RemoveAll(tempDir)
-		return err
-	}
-
-	// Prepare base prefix to strip (ensure trailing slash if non-empty)
 	basePrefix := info.Path
 	if basePrefix != "" && !strings.HasSuffix(basePrefix, "/") {
-		basePrefix = basePrefix + "/"
+		basePrefix += "/"
 	}
 
-	// Download files concurrently and write directly to disk
-	err = downloadAndWriteFiles(allFiles, tempDir, basePrefix)
-	if err != nil {
+	if err := d.downloadFiles(ctx, files, tempDir, basePrefix); err != nil {
 		os.RemoveAll(tempDir)
 		return err
 	}
 
-	// Remove existing output directory if it exists
 	if err := os.RemoveAll(outputDirName); err != nil && !os.IsNotExist(err) {
 		os.RemoveAll(tempDir)
 		return fmt.Errorf("failed to remove existing output directory: %w", err)
 	}
-
-	// Atomically rename temp directory to final output directory
 	if err := os.Rename(tempDir, outputDirName); err != nil {
 		os.RemoveAll(tempDir)
 		return fmt.Errorf("failed to rename temp directory: %w", err)
@@ -70,159 +59,77 @@ func DownloadFolder(info *GitHubURLInfo, outputDirName string) error {
 	return nil
 }
 
-func collectAllFiles(apiURL string, allFiles *[]GitHubContent) error {
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return err
-	}
-	setGitHubHeaders(req)
+func (d *Downloader) downloadFiles(ctx context.Context, files []GitHubContent, outputDir, basePrefix string) error {
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(d.concurrency)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// Enhance 403 errors with guidance and rate limit info
-		if resp.StatusCode == http.StatusForbidden {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			remaining := resp.Header.Get("X-RateLimit-Remaining")
-			reset := resp.Header.Get("X-RateLimit-Reset")
-			msg := fmt.Sprintf("github API responded with status: %s", resp.Status)
-			if len(bodyBytes) > 0 {
-				msg = fmt.Sprintf("%s - %s", msg, strings.TrimSpace(string(bodyBytes)))
-			}
-			if remaining == "0" && reset != "" {
-				if sec, err := strconv.ParseInt(reset, 10, 64); err == nil {
-					t := time.Unix(sec, 0)
-					msg = fmt.Sprintf("%s. Rate limit reset at %s. Set GITHUB_TOKEN env var to increase limits.", msg, t.Local().Format(time.RFC1123))
-				}
-			} else {
-				msg = msg + ". If this is due to rate limiting, set GITHUB_TOKEN to increase limits."
-			}
-			return fmt.Errorf("%s", msg)
-		}
-		return fmt.Errorf("github API responded with status: %s", resp.Status)
-	}
-
-	var contents []GitHubContent
-	if err := json.NewDecoder(resp.Body).Decode(&contents); err != nil {
-		return err
-	}
-
-	for _, item := range contents {
-		if item.Type == "file" {
-			*allFiles = append(*allFiles, item)
-		} else if item.Type == "dir" {
-			// Recursively collect files from subdirectories
-			if err := collectAllFiles(item.URL, allFiles); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func downloadAndWriteFiles(files []GitHubContent, outputDir string, basePrefix string) error {
-	// Download files concurrently and write directly to disk
-	var wg sync.WaitGroup
-	errCh := make(chan error, 1)
-
-	// Limit concurrent downloads
-	semaphore := make(chan struct{}, 10)
+	total := len(files)
+	var completed atomic.Int64
 
 	for _, file := range files {
-		wg.Add(1)
-		go func(f GitHubContent) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			// Download file content
-			content, err := downloadFileContent(f)
-			if err != nil {
-				select {
-				case errCh <- fmt.Errorf("failed to download %s: %w", f.Path, err):
-				default:
-				}
-				return
-			}
-
-			// Calculate relative path
+		f := file
+		g.Go(func() error {
 			rel := f.Path
-			if basePrefix != "" && strings.HasPrefix(rel, basePrefix) {
+			if basePrefix != "" {
 				rel = strings.TrimPrefix(rel, basePrefix)
 			}
 			rel = strings.TrimLeft(rel, "/")
 
-			// Create destination path
 			destPath := filepath.Join(outputDir, rel)
-
-			// Create parent directories
 			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-				select {
-				case errCh <- fmt.Errorf("failed to create directory for %s: %w", rel, err):
-				default:
-				}
-				return
+				return fmt.Errorf("failed to create directory for %s: %w", rel, err)
 			}
 
-			// Write to temporary file first for atomic operation
-			tempFile := destPath + ".tmp"
-			if err := os.WriteFile(tempFile, content, 0644); err != nil {
-				select {
-				case errCh <- fmt.Errorf("failed to write %s: %w", rel, err):
-				default:
-				}
-				return
+			d.logger.Debug("downloading file", "path", rel, "url", f.DownloadURL)
+
+			if err := d.streamFile(ctx, f.DownloadURL, destPath); err != nil {
+				return fmt.Errorf("failed to download %s: %w", rel, err)
 			}
 
-			// Atomically rename to final destination
-			if err := os.Rename(tempFile, destPath); err != nil {
-				os.Remove(tempFile) // cleanup on failure
-				select {
-				case errCh <- fmt.Errorf("failed to finalize %s: %w", rel, err):
-				default:
-				}
-				return
+			n := int(completed.Add(1))
+			if d.onProgress != nil {
+				d.onProgress(Progress{
+					TotalFiles:     total,
+					CompletedFiles: n,
+					CurrentFile:    rel,
+				})
 			}
-		}(file)
+			return nil
+		})
 	}
 
-	// Wait for all downloads to complete
-	go func() {
-		wg.Wait()
-		close(errCh)
-	}()
-
-	// Return first error if any
-	if err, ok := <-errCh; ok {
-		return err
-	}
-
-	return nil
+	return g.Wait()
 }
 
-func downloadFileContent(file GitHubContent) ([]byte, error) {
-	req, err := http.NewRequest("GET", file.DownloadUrl, nil)
+// streamFile downloads a URL and streams it directly to destPath via a temp file.
+func (d *Downloader) streamFile(ctx context.Context, downloadURL, destPath string) error {
+	resp, err := d.doWithRetry(ctx, downloadURL)
 	if err != nil {
-		return nil, err
-	}
-	setGitHubHeaders(req)
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to download file: %s", resp.Status)
+	tmpPath := destPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
 	}
 
-	return io.ReadAll(resp.Body)
+	_, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to write file: %w", copyErr)
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close file: %w", closeErr)
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to finalize file: %w", err)
+	}
+	return nil
 }
-
-

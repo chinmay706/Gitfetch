@@ -1,41 +1,37 @@
 package downloader
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 )
 
+// GitHubContent represents a single item returned by the GitHub Contents API.
 type GitHubContent struct {
 	Name        string `json:"name"`
 	Path        string `json:"path"`
 	Type        string `json:"type"`
-	DownloadUrl string `json:"download_url"`
-	URL         string `json:"url"`
+	Size        int64  `json:"size"`
+	DownloadURL string `json:"download_url"`
+	APIURL      string `json:"url"`
 }
 
-func getRepoContents(info *GitHubURLInfo) ([]GitHubContent, error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s",
-		info.Owner, info.Repo, info.Path, info.Branch)
-
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-
+func (d *Downloader) setHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "gitf-cli")
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if d.token != "" {
+		req.Header.Set("Authorization", "token "+d.token)
 	}
-	setGitHubHeaders(req)
+}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+// fetchContents makes a single GitHub Contents API call and decodes the result.
+func (d *Downloader) fetchContents(ctx context.Context, apiURL string) ([]GitHubContent, error) {
+	resp, err := d.doWithRetry(ctx, apiURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get repository contents: %w", err)
+		return nil, fmt.Errorf("failed to fetch contents: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github API responded with status: %s", resp.Status)
-	}
 
 	var contents []GitHubContent
 	if err := json.NewDecoder(resp.Body).Decode(&contents); err != nil {
@@ -44,16 +40,36 @@ func getRepoContents(info *GitHubURLInfo) ([]GitHubContent, error) {
 	return contents, nil
 }
 
-// setGitHubHeaders sets common headers and optional auth for GitHub API
-func setGitHubHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "gitf-cli")
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
+// CollectFiles recursively walks a GitHub directory tree and returns all files.
+// This is the public entry point used by both DownloadFolder and dry-run mode.
+func (d *Downloader) CollectFiles(ctx context.Context, info *GitHubURLInfo) ([]GitHubContent, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
+		d.baseURL, info.Owner, info.Repo, info.Path, info.Branch)
+	return d.collectFilesRecursive(ctx, apiURL)
+}
+
+func (d *Downloader) collectFilesRecursive(ctx context.Context, apiURL string) ([]GitHubContent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if token != "" {
-		// GitHub accepts either "token" or "Bearer" schemes
-		req.Header.Set("Authorization", "token "+token)
+
+	contents, err := d.fetchContents(ctx, apiURL)
+	if err != nil {
+		return nil, err
 	}
+
+	var files []GitHubContent
+	for _, item := range contents {
+		switch item.Type {
+		case "file":
+			files = append(files, item)
+		case "dir":
+			sub, err := d.collectFilesRecursive(ctx, item.APIURL)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, sub...)
+		}
+	}
+	return files, nil
 }

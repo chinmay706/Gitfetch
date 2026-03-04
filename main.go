@@ -1,7 +1,11 @@
 package main
 
 import (
-	"github.com/DibyashaktiMoharana/gitf/cmd"
+	"context"
+	"os/signal"
+	"syscall"
+
+	"github.com/chinmay706/gitf/cmd"
 	"github.com/joho/godotenv"
 )
 
@@ -12,8 +16,12 @@ var (
 )
 
 func main() {
-	// Load .env file if present (silently ignore if missing)
 	_ = godotenv.Load()
-	
-	cmd.Execute()
+
+	cmd.SetVersionInfo(version, commit, date)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	cmd.Execute(ctx)
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -12,27 +13,20 @@ var rootCmd = &cobra.Command{
 	Use:   "gitf",
 	Short: "gitf is a CLI tool to download a specific folder from GitHub.",
 	Long: `A fast and simple command-line tool written in Go to download a
-	specific folder from a public GitHub repository without cloning the entire project.`,
+specific folder from a public GitHub repository without cloning the entire project.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ascii := figlet4go.NewAsciiRender()
-
 		renderStr, _ := ascii.Render("gitf")
 		fmt.Print(renderStr)
-
 		fmt.Println()
-
 		fmt.Println("A fast and simple tool to download specific folders from GitHub.")
 		fmt.Println("-----------------------------------------------------------------")
 	},
 }
 
-func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
+// Execute runs the root command with the given context.
+func Execute(ctx context.Context) {
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
-}
-
-func init() {
-	// Flags and configuration settings can be defined here.
 }

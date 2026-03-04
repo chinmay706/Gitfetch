@@ -17,7 +17,7 @@ A fast and simple command-line tool written in Go to download specific folders f
 Install directly with Go:
 
 ```bash
-go install github.com/DibyashaktiMoharana/gitf@latest
+go install github.com/chinmay706/gitf@latest
 ```
 
 If `gitf` is not found after installation, add Go's bin directory to your PATH:
@@ -33,7 +33,7 @@ $env:PATH += ";$env:GOPATH\bin"
 
 ### Alternative: Download Binary
 
-1. Download the latest release from the [Releases page](https://github.com/DibyashaktiMoharana/gitf/releases)
+1. Download the latest release from the [Releases page](https://github.com/chinmay706/gitf/releases)
 2. Extract the binary to your system PATH
 3. Make it executable:
    ```bash
@@ -101,7 +101,7 @@ Flags:
 
 ```bash
 # Clone the repository
-git clone https://github.com/DibyashaktiMoharana/gitf.git
+git clone https://github.com/chinmay706/gitf.git
 cd gitf
 
 # Install dependencies
