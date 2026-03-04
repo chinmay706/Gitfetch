@@ -10,7 +10,7 @@ from typing import Optional
 
 import requests
 
-DEFAULT_SERVER = "http://localhost:8080"
+DEFAULT_SERVER = "https://chinmay706-gitfetch-api.hf.space"
 _TIMEOUT = 30
 
 
