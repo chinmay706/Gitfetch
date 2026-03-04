@@ -1,3 +1,12 @@
+---
+title: Gitfetch API
+emoji: 📂
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # gitf
 
 A fast and simple command-line tool written in Go to download specific folders from public GitHub repositories without cloning the entire project.
